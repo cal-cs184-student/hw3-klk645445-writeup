@@ -28,12 +28,13 @@
 	<body>
 		<div class="container">
 		<h1>CS184/284A Fall 2026 Homework 3 Write-Up</h1>
-		<div style="text-align: center;">Names: </div>
+		<div style="text-align: center;">Names: Kway Ler Koon</div>
 
 		<br>
 
-		Link to webpage: (TODO) <a href="https://cs184.eecs.berkeley.edu/fa26">cs184.eecs.berkeley.edu/fa26</a>
-		Link to GitHub repository: (TODO) <a href="https://cs184.eecs.berkeley.edu/fa26">cs184.eecs.berkeley.edu/fa26</a>
+		Link to webpage: <a href="https://cal-cs184-student.github.io/hw3-klk645445-writeup/">cal-cs184-student.github.io/hw3-klk645445-writeup</a>
+		<br>
+		Link to GitHub repository: <a href="https://github.com/cal-cs184-student/hw3-klk645445">github.com/cal-cs184-student/hw3-klk645445</a>
 		
 		<figure>
 			<img src="assets/cornell.png" alt="Cornell Boxes with Bunnies" style="width:70%"/>
@@ -48,36 +49,259 @@
 		Give a high-level overview of what you implemented in this homework. Think about what you've built as a whole. Share your thoughts on what interesting things you've learned from completing the homework.
 
 		<h2>Part 1: Ray Generation and Scene Intersection</h2>
-		Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum.
+		<p>
+		Unlike the rasterizer, which projects triangles onto the screen, a path tracer works backwards. For every pixel, it shoots
+		rays from the camera out into the scene, finds the closest object that each ray hits, and then estimates how much light
+		travels back along that ray to the camera. Part 1 covers the first two steps: generating the camera rays and
+		intersecting them with the triangles and spheres in the scene.
+		</p>
 
-		<p>Here is an example 2x2 gridlike structure using an HTML table. Each <b>tr</b> is a row and each <b>td</b> is a column in that row. You might find this useful for framing and showing your result images in an organized fashion.</p>
+		<p>
+		Each pixel is sampled several times so that the image is antialiased. I implemented this in
+		<code>PathTracer::raytrace_pixel</code>. For each of the <code>ns_aa</code> samples, I add a random offset in
+		\( [0, 1)^2 \) from <code>gridSampler</code> to the pixel's bottom-left corner \( (x, y) \), so the samples are spread
+		across the whole pixel, and then divide by the width and height of the sample buffer to get normalized image coordinates
+		in \( [0, 1]^2 \). I pass those coordinates to <code>Camera::generate_ray</code>, estimate the radiance along the ray,
+		and add it to a running total. At the end, I divide the total by the number of samples, write the average into the
+		sample buffer, and record the number of samples taken in <code>sampleCountBuffer</code>.
+		</p>
+
+		<p>
+		<code>Camera::generate_ray</code> turns the normalized image coordinates into an actual ray. In camera space the camera
+		sits at the origin looking down the \( -z \) axis, and the virtual sensor plane is one unit in front of it at
+		\( z = -1 \). How big the sensor is depends on the field of view: it spans from \( -\tan(\text{hFov}/2) \) to
+		\( \tan(\text{hFov}/2) \) horizontally, and likewise with vFov vertically. Mapping \( [0, 1] \) onto that range gives the point
+		\[ \big((2x - 1)\tan(\frac{\text{hFov}}{2}),\; (2y - 1)\tan(\frac{\text{vFov}}{2}),\; -1\big), \]
+		where the field of view has to be converted from degrees to radians first. Since the camera is at the origin, this point
+		is also the ray's direction in camera space. I rotate it into world space with the camera-to-world matrix
+		<code>c2w</code>, normalize it, and create a ray starting at the camera's position <code>pos</code>. Finally, I set the
+		ray's <code>min_t</code> and <code>max_t</code> to the near and far clipping distances <code>nClip</code> and
+		<code>fClip</code>, so that only objects between the two clipping planes can be hit.
+		</p>
+
+		<p>
+		A ray is written as \( \mathbf{r}(t) = \mathbf{o} + t\,\mathbf{d} \), and it is only valid for \( t \) between
+		<code>min_t</code> and <code>max_t</code>. The key observation for finding the closest hit is that whenever a primitive
+		is hit, I can shrink the ray's <code>max_t</code> down to that \( t \). Any primitive tested afterwards then only counts
+		as a hit if it is closer, so the nearest intersection is the one that is kept at the end, without needing to sort
+		anything. On a hit, I also fill in the <code>Intersection</code> record with \( t \), the surface normal, the primitive
+		and its BSDF, which the later parts use for shading. Each primitive has two functions:
+		</p>
+		<ul>
+		<li><code>has_intersection</code>: only answers whether the ray hits the primitive or not. I implemented this by calling
+			<code>intersect</code> with a temporary <code>Intersection</code> that is thrown away, so the math only lives in one place.</li>
+		<li><code>intersect</code>: does the actual intersection test, and on a hit updates <code>max_t</code> and fills in the
+			<code>Intersection</code>.</li>
+		</ul>
+
+		<p>
+		For triangles, I used the M&ouml;ller&ndash;Trumbore algorithm. Any point on the triangle can be written with barycentric
+		coordinates as \( (1 - b_1 - b_2)\,\mathbf{p}_1 + b_1\mathbf{p}_2 + b_2\mathbf{p}_3 \). Setting this equal to the ray
+		\( \mathbf{o} + t\,\mathbf{d} \) gives three equations (one for each of \( x, y, z \)) in the three unknowns
+		\( t, b_1, b_2 \). Letting \( \mathbf{E}_1 = \mathbf{p}_2 - \mathbf{p}_1 \), \( \mathbf{E}_2 = \mathbf{p}_3 - \mathbf{p}_1 \),
+		\( \mathbf{S} = \mathbf{o} - \mathbf{p}_1 \), \( \mathbf{S}_1 = \mathbf{d} \times \mathbf{E}_2 \) and
+		\( \mathbf{S}_2 = \mathbf{S} \times \mathbf{E}_1 \), the solution is
+		\[ \begin{bmatrix} t \\ b_1 \\ b_2 \end{bmatrix} = \frac{1}{\mathbf{S}_1 \cdot \mathbf{E}_1}
+		\begin{bmatrix} \mathbf{S}_2 \cdot \mathbf{E}_2 \\ \mathbf{S}_1 \cdot \mathbf{S} \\ \mathbf{S}_2 \cdot \mathbf{d} \end{bmatrix}. \]
+		If the denominator \( \mathbf{S}_1 \cdot \mathbf{E}_1 \) is almost zero, the ray is parallel to the triangle's plane and
+		there is no hit. Otherwise, the ray only hits the triangle if \( t \) is inside the ray's valid range and all three
+		barycentric coordinates \( b_0 = 1 - b_1 - b_2 \), \( b_1 \) and \( b_2 \) are non-negative. The \( t \) check alone is not
+		enough, since it only tells me the ray hits the plane, and the barycentric check is what makes sure the point is actually
+		inside the triangle. For the normal, I reused the barycentric coordinates to interpolate the three vertex normals
+		\( b_0\mathbf{n}_1 + b_1\mathbf{n}_2 + b_2\mathbf{n}_3 \) and normalized the result, which is the same idea as the
+		smooth shading from homework 2.
+		</p>
+
+		<p>
+		For spheres, substituting the ray into the sphere equation \( \|\mathbf{p} - \mathbf{c}\|^2 = R^2 \) gives a quadratic
+		\( at^2 + bt + c = 0 \), with \( a = \mathbf{d}\cdot\mathbf{d} \), \( b = 2(\mathbf{o} - \mathbf{c})\cdot\mathbf{d} \)
+		and \( c = \|\mathbf{o} - \mathbf{c}\|^2 - R^2 \). If the discriminant is negative, the ray misses the sphere. Otherwise,
+		the two roots \( t_1 \le t_2 \) are where the ray enters and leaves the sphere. I use \( t_1 \) if it is inside the
+		ray's valid range, and otherwise \( t_2 \), which happens when the ray starts inside the sphere. The normal is just the
+		unit vector from the center of the sphere to the hit point.
+		</p>
+
+		<p>
+		I ran into a few bugs along the way. After implementing ray generation, the whole render was a yellow and green gradient.
+		This turned out to be expected, since the starter <code>intersect</code> functions returned true without setting \( t \),
+		so every pixel was colored by its ray direction, which actually confirmed that my rays were spreading out correctly. The
+		first real bug was that I had used hFov for both the \( x \) and the \( y \) coordinates, which would have stretched
+		the image vertically, and I had also left the starter code's placeholder <code>return</code> at the end of
+		<code>generate_ray</code>, so my ray was never returned. In the triangle code, I first only checked \( t \) and forgot
+		the barycentric inside test, which means a triangle would count as hit anywhere on its infinite plane. I also had not set
+		the normal in the <code>Intersection</code> yet. Adding the check for \( b_0, b_1, b_2 \ge 0 \) and the interpolated
+		normal fixed both.
+		</p>
+
+		<p>
+		The screenshots below are rendered with normal shading, where each surface is colored by the direction its normal points,
+		and were saved using the <code style="white-space: nowrap;">-f</code> flag. The walls of the empty Cornell box test triangles, the two spheres test
+		the sphere intersection, and the banana shows the interpolated vertex normals blending smoothly across its triangles.
+		</p>
 		<div style="display: flex; flex-direction: column; align-items: center;">
 			<table style="width: 100%; text-align: center; border-collapse: collapse;">
 			  <tr>
 				<td style="text-align: center;">
-				  <img src="assets/cornell.png" width="400px"/>
-				  <figcaption>Caption goes here.</figcaption>
+				  <img src="assets/part1_CBempty.png" width="400px"/>
+				  <figcaption><code>dae/sky/CBempty.dae</code>: only triangles (the walls, floor, ceiling and light)</figcaption>
 				</td>
 				<td style="text-align: center;">
-				  <img src="assets/cornell.png" width="400px"/>
-				  <figcaption>Caption goes here.</figcaption>
+				  <img src="assets/part1_CBspheres_lambertian.png" width="400px"/>
+				  <figcaption><code>dae/sky/CBspheres_lambertian.dae</code>: two spheres inside the box</figcaption>
 				</td>
 			  </tr>
 			  <tr>
 				<td style="text-align: center;">
-				  <img src="assets/cornell.png" width="400px"/>
-				  <figcaption>Caption goes here.</figcaption>
+				  <img src="assets/part1_banana.png" width="400px"/>
+				  <figcaption><code>dae/keenan/banana.dae</code>: smooth normals interpolated across the triangle mesh</figcaption>
 				</td>
 				<td style="text-align: center;">
-				  <img src="assets/cornell.png" width="400px"/>
-				  <figcaption>Caption goes here.</figcaption>
+				  <img src="assets/part1_CBgems.png" width="400px"/>
+				  <figcaption><code>dae/sky/CBgems.dae</code>: three faceted gem meshes, where the individual triangles are visible</figcaption>
 				</td>
 			  </tr>
 			</table>
 		</div>
-		
+
 		<h2>Part 2: Bounding Volume Hierarchy</h2>
-		Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum.
+		<p>
+		With only Part 1, every ray is tested against every primitive in the scene, so the cost per ray grows linearly with the
+		number of triangles. A bounding volume hierarchy (BVH) fixes this by organizing the primitives into a binary tree of
+		axis-aligned bounding boxes. The root box contains the whole scene, each interior node splits its primitives into two
+		groups with their own smaller boxes, and the leaves hold only a few primitives. If a ray misses a node's box, it cannot
+		hit anything inside it, so the entire subtree can be skipped with a single box test. For a reasonably balanced tree this
+		brings the work per ray down from \( O(n) \) to roughly \( O(\log n) \).
+		</p>
+
+		<p>
+		I implemented the construction in <code>BVHAccel::construct_bvh</code>, which is recursive and works on a range
+		<code>[start, end)</code> of the primitive vector. Each call does the following:
+		</p>
+		<ul>
+		<li>Loops over the primitives and builds two boxes: <code>bbox</code>, which is the union of every primitive's bounding
+			box and becomes the node's box, and <code>centroid_box</code>, which only contains the centroid of each primitive's
+			bounding box.</li>
+		<li>If the range has at most <code>max_leaf_size</code> primitives, it makes a leaf by storing <code>start</code> and
+			<code>end</code> in the node and returns.</li>
+		<li>Otherwise, it picks the axis along which <code>centroid_box</code> has the largest extent, and splits at the midpoint
+			of the centroid box along that axis.</li>
+		<li>It uses <code>std::partition</code> to reorder the range in place so that every primitive whose centroid is less than
+			the split point comes first. The returned iterator <code>mid</code> marks where the right side begins.</li>
+		<li>It recurses on <code>[start, mid)</code> for the left child and <code>[mid, end)</code> for the right child.</li>
+		</ul>
+
+		<p>
+		The heuristic I chose is a midpoint split along the longest axis of the centroid box. Splitting the longest axis
+		separates the primitives where they are the most spread out, which tends to give two groups that are far apart and
+		whose boxes overlap as little as possible. I used the centroid box instead of the full bounding box because a few large
+		triangles (like the walls of the Cornell box) can stretch the full box far past where most of the primitives actually
+		are, which would push the split point to a bad place. Since <code>std::partition</code> only reorders the vector, no
+		primitives are copied, and every leaf can be described by just a sub-range of the same vector. There is one edge case:
+		if all the centroids land on the same side of the split, for example when many primitives share the same centroid,
+		one child would get the whole range again and the recursion would never end. In that case I fall back to splitting the
+		range in half by count, <code>mid = start + (end - start) / 2</code>, which guarantees that both children get smaller.
+		</p>
+
+		<p>
+		For the ray-box test in <code>BBox::intersect</code>, I used the slab method. An axis-aligned box is the intersection
+		of three slabs, each one being the space between two parallel planes. For each axis \( a \), the ray crosses the two
+		planes at
+		\[ t_{\text{min}} = \frac{\text{min}_a - o_a}{d_a}, \qquad t_{\text{max}} = \frac{\text{max}_a - o_a}{d_a}, \]
+		and I swap them if the ray points in the negative direction so that the first is always the entry time. The ray is
+		inside the box only while it is inside all three slabs, so it enters at the largest of the three entry times and
+		exits at the smallest of the three exit times. If the entry is after the exit, the ray misses the box. Otherwise, I
+		also check that this interval overlaps the range \( [t_0, t_1] \) that was passed in, and if it does, I narrow
+		\( t_0 \) and \( t_1 \) to the overlap. When the ray is parallel to an axis, \( d_a = 0 \) and the division gives
+		\( \pm\infty \), which the min and max comparisons already handle correctly.
+		</p>
+
+		<p>
+		The traversal in <code>BVHAccel::intersect</code> first tests the ray against the node's box using the ray's current
+		<code>min_t</code> and <code>max_t</code>, and returns false right away if it misses. At a leaf, it tests every primitive
+		from <code>node-&gt;start</code> to <code>node-&gt;end</code> with the Part 1 code. At an interior node, it recurses into
+		both children. The key observation is that both children have to be visited, because the left child finding a hit does
+		not mean the right child cannot have a closer one. Since every hit shrinks <code>max_t</code>, the second child's box
+		test uses the smaller range, so if its box is entirely behind the hit that was already found, it is skipped
+		immediately. <code>BVHAccel::has_intersection</code> has the same structure, but since it only needs to know whether
+		there is any hit at all, it returns as soon as it finds one.
+		</p>
+
+		<p>
+		My first version of <code>construct_bvh</code> declared <code>centroid_box</code> but never expanded it. An empty
+		<code>BBox</code> has its min at \( +\infty \) and its max at \( -\infty \), so the split point came out as NaN. Every
+		comparison with NaN is false, so all of the primitives went to the right side, and the fallback split by count kicked
+		in at every level. This would not have crashed and the renders would still have looked correct, which makes it easy to
+		miss, but the tree would have completely ignored where the primitives were. I then expanded <code>centroid_box</code>
+		by the full bounding box instead of the centroid, which just made it a copy of <code>bbox</code>. The cow still rendered
+		correctly with this version, and I only caught it when going back over the code, before fixing it to
+		<code>bb.centroid()</code>. In the traversal, I also originally computed the results of both children but then returned
+		<code>has_intersection</code> on them instead of <code>hitL || hitR</code>, which would have searched the tree a second
+		time and could report a hit without filling in the <code>Intersection</code>.
+		</p>
+
+		<p>
+		With the BVH, all of the scenes below render in a fraction of a second, even though they have between 50,000 and
+		134,000 triangles. Building the BVH itself takes less than 0.03 seconds for all of them. The screenshots are rendered
+		with normal shading and were saved using the <code style="white-space: nowrap;">-f</code> flag.
+		</p>
+		<div style="display: flex; flex-direction: column; align-items: center;">
+			<table style="width: 100%; text-align: center; border-collapse: collapse;">
+			  <tr>
+				<td style="text-align: center;">
+				  <img src="assets/part2_CBlucy.png" width="400px"/>
+				  <figcaption><code>dae/sky/CBlucy.dae</code> (133,796 primitives)</figcaption>
+				</td>
+				<td style="text-align: center;">
+				  <img src="assets/part2_maxplanck.png" width="400px"/>
+				  <figcaption><code>dae/meshedit/maxplanck.dae</code> (50,801 primitives)</figcaption>
+				</td>
+			  </tr>
+			  <tr>
+				<td style="text-align: center;">
+				  <img src="assets/part2_beast.png" width="400px"/>
+				  <figcaption><code>dae/meshedit/beast.dae</code> (64,618 primitives)</figcaption>
+				</td>
+				<td style="text-align: center;">
+				  <img src="assets/part2_CBdragon.png" width="400px"/>
+				  <figcaption><code>dae/sky/CBdragon.dae</code> (100,012 primitives)</figcaption>
+				</td>
+			  </tr>
+			</table>
+		</div>
+
+		<p>
+		To compare, I rendered five scenes of increasing size with and without the BVH. For the version without it, I used a
+		separate copy of the code where <code>intersect</code> and <code>has_intersection</code> loop over every primitive,
+		like the starter code. All renders were at 800×600 with 1 sample per pixel and 8 threads. The render times come from
+		the renderer's own timer. For the intersection tests per ray, I re-ran each scene with a single thread at 200×150,
+		because the counters are incremented by all of the threads at once without a lock, so with 8 threads some increments
+		get lost and the numbers come out wrong. The counts only include ray-primitive tests and not ray-box tests.
+		</p>
+		<div style="display: flex; flex-direction: column; align-items: center;">
+			<table style="border-collapse: collapse; text-align: center;" border="1" cellpadding="6">
+			  <tr>
+				<th>Scene</th><th>Primitives</th>
+				<th>Time without BVH</th><th>Time with BVH</th><th>Speedup</th>
+				<th>Tests / ray without BVH</th><th>Tests / ray with BVH</th>
+			  </tr>
+			  <tr><td><code>teapot.dae</code></td><td>2,464</td><td>1.74 s</td><td>0.035 s</td><td>~50×</td><td>2,464</td><td>9.6</td></tr>
+			  <tr><td><code>cow.dae</code></td><td>5,856</td><td>4.99 s</td><td>0.025 s</td><td>~200×</td><td>5,856</td><td>16.6</td></tr>
+			  <tr><td><code>beetle.dae</code></td><td>7,558</td><td>6.36 s</td><td>0.030 s</td><td>~210×</td><td>7,558</td><td>10.9</td></tr>
+			  <tr><td><code>CBbunny.dae</code></td><td>28,588</td><td>34.3 s</td><td>0.031 s</td><td>~1,100×</td><td>28,588</td><td>3.0</td></tr>
+			  <tr><td><code>maxplanck.dae</code></td><td>50,801</td><td>53.6 s</td><td>0.032 s</td><td>~1,700×</td><td>50,801</td><td>13.3</td></tr>
+			</table>
+		</div>
+
+		<p>
+		Without the BVH, every ray tests exactly as many primitives as the scene has, so the render time grows linearly with
+		the number of primitives, from under 2 seconds for the teapot to almost a minute for Max Planck. With the BVH, the
+		number of tests per ray stays between about 3 and 17 no matter how big the scene is, and the render time stays at about
+		0.03 seconds for all five scenes. Because of this, the speedup gets larger as the scene gets bigger, going from about
+		50× on the teapot to about 1,700× on Max Planck. The bunny needs the fewest tests per ray, because most of the rays hit
+		the large wall triangles of the Cornell box, which end up in their own small leaves, and the bunny itself only covers a
+		small part of the image. At these speeds the BVH render times are so small that they are mostly fixed overhead, so the
+		real difference on larger scenes like Lucy would be even bigger.
+		</p>
 
 		<h2>Part 3: Direct Illumination</h2>
 		Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum.
